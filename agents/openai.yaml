@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kimi Floral Trends"
+  short_description: "Kimi floral trend Top 6 reports"
+  default_prompt: "Search recent floral and print pattern trends with Kimi Code, rank the Top 6, and write one Markdown article per trend."
