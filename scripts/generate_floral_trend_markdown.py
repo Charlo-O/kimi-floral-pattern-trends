@@ -24,6 +24,90 @@ DEFAULT_REGION = "中国与全球"
 DEFAULT_DOMAIN = "家纺、面料印花、图案设计、软装与服饰图案"
 DEFAULT_LANGUAGE = "中文"
 DEFAULT_COUNT = 6
+PATTERN_POSITIVE_KEYWORDS = (
+    "pattern",
+    "print",
+    "floral",
+    "flower",
+    "motif",
+    "repeat",
+    "swatch",
+    "fabric",
+    "textile",
+    "wallpaper",
+    "surface",
+    "botanical",
+    "bloom",
+    "paisley",
+    "geometric",
+    "abstract",
+    "stripe",
+    "tile",
+    "ornament",
+    "jacquard",
+    "embroidery",
+    "花型",
+    "印花",
+    "图案",
+    "纹样",
+    "花卉",
+    "碎花",
+    "几何",
+    "腰果花",
+    "条纹",
+    "提花",
+    "面料",
+    "布样",
+    "壁纸",
+)
+PATTERN_NEGATIVE_KEYWORDS = (
+    "person",
+    "people",
+    "portrait",
+    "selfie",
+    "runway",
+    "catwalk-look",
+    "model",
+    "sofa",
+    "bedroom",
+    "living-room",
+    "kitchen",
+    "interior",
+    "room",
+    "home-tour",
+    "campaign",
+    "collection",
+    "storefront",
+    "showroom",
+    "launch",
+    "logo",
+    "favicon",
+    "avatar",
+    "headshot",
+    "lookbook",
+    "人物",
+    "模特",
+    "空间",
+    "场景",
+    "客厅",
+    "卧室",
+    "家具",
+    "沙发",
+    "店铺",
+    "门店",
+    "品牌",
+    "封面",
+    "海报",
+    "穿搭",
+)
+TRUSTED_PATTERN_DOMAINS = (
+    "patternbank.com",
+    "walanwalan.com",
+    "91jiafang.com",
+    "91jf.com",
+    "fzthinking.com",
+    "cfw.cn",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,6 +224,32 @@ def parse_json_array(raw_text: str, cwd: Path) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)]
 
 
+def parse_json_object(raw_text: str, cwd: Path) -> dict[str, Any]:
+    candidate = extract_json_block(raw_text)
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        repair_prompt = textwrap.dedent(
+            f"""
+            下面是一段原始文本。请把其中的内容修复为严格 JSON 对象。
+            要求：
+            - 只输出 JSON 对象
+            - 不要解释
+            - 去掉代码块、注释、尾逗号和无效字符
+            - 保留原始字段和值，不要补写新的事实
+
+            原始文本如下：
+            {raw_text}
+            """
+        ).strip()
+        repaired = run_kimi(repair_prompt, cwd)
+        data = json.loads(extract_json_block(repaired))
+
+    if not isinstance(data, dict):
+        raise ValueError("Parsed JSON is not an object.")
+    return data
+
+
 def slugify(value: str, fallback: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
     ascii_only = normalized.encode("ascii", "ignore").decode("ascii").lower()
@@ -236,6 +346,11 @@ def is_usable_image_url(url: str) -> bool:
     return lowered.startswith("http://") or lowered.startswith("https://")
 
 
+def keyword_hits(text: str, keywords: tuple[str, ...]) -> int:
+    lowered = text.lower()
+    return sum(1 for keyword in keywords if keyword in lowered)
+
+
 def confirm_image_asset(url: str) -> bool:
     if not is_usable_image_url(url):
         return False
@@ -275,43 +390,138 @@ def fetch_html(url: str) -> str:
 
 def iter_candidate_image_urls(html: str, page_url: str) -> list[str]:
     patterns = [
-        re.compile(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
-        re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::secure_url)?["\']', re.IGNORECASE),
-        re.compile(r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
-        re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image(?::src)?["\']', re.IGNORECASE),
-        re.compile(r'<meta[^>]+name=["\']image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
-        re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']image["\']', re.IGNORECASE),
-        re.compile(r'<meta[^>]+itemprop=["\']image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
-        re.compile(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']', re.IGNORECASE),
-        re.compile(r'<link[^>]+as=["\']image["\'][^>]+href=["\']([^"\']+)["\']', re.IGNORECASE),
-        re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE),
+        ("og", re.compile(r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)),
+        ("og", re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::secure_url)?["\']', re.IGNORECASE)),
+        ("twitter", re.compile(r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)),
+        ("twitter", re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image(?::src)?["\']', re.IGNORECASE)),
+        ("meta", re.compile(r'<meta[^>]+name=["\']image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)),
+        ("meta", re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']image["\']', re.IGNORECASE)),
+        ("meta", re.compile(r'<meta[^>]+itemprop=["\']image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)),
+        ("preload", re.compile(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)),
+        ("preload", re.compile(r'<link[^>]+as=["\']image["\'][^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)),
+        ("img", re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)),
     ]
-    candidates: list[str] = []
-    for pattern in patterns:
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for source_kind, pattern in patterns:
         for match in pattern.finditer(html):
             candidate = urljoin(page_url, unescape(match.group(1).strip()))
             if not is_usable_image_url(candidate):
                 continue
-            if candidate in candidates:
+            if candidate in seen:
                 continue
-            candidates.append(candidate)
+            start = max(0, match.start() - 180)
+            end = min(len(html), match.end() + 180)
+            context = html[start:end]
+            candidates.append({"url": candidate, "kind": source_kind, "context": context})
+            seen.add(candidate)
     return candidates
 
 
-def extract_image_url_from_html(html: str, page_url: str) -> str:
-    for candidate in iter_candidate_image_urls(html, page_url):
-        parsed = urlparse(candidate)
+def evidence_image_score(trend: dict[str, Any], evidence: dict[str, str], candidate: dict[str, str], page_text: str) -> int:
+    domain = urlparse(evidence.get("url", "")).netloc.lower()
+    evidence_text = " ".join(
+        [
+            trend.get("name_zh", ""),
+            trend.get("name_en", ""),
+            evidence.get("source_name", ""),
+            evidence.get("title", ""),
+            evidence.get("note", ""),
+            page_text,
+            candidate.get("url", ""),
+            candidate.get("context", ""),
+        ]
+    )
+    score = keyword_hits(evidence_text, PATTERN_POSITIVE_KEYWORDS) * 2
+    score -= keyword_hits(evidence_text, PATTERN_NEGATIVE_KEYWORDS) * 3
+    if any(trusted in domain for trusted in TRUSTED_PATTERN_DOMAINS):
+        score += 4
+    if candidate.get("kind") in {"img", "preload"}:
+        score += 2
+    if candidate.get("kind") in {"og", "twitter", "meta"}:
+        score -= 1
+    return score
+
+
+def extract_image_url_from_html(html: str, page_url: str, trend: dict[str, Any], evidence: dict[str, str]) -> str:
+    page_text = " ".join([evidence.get("source_name", ""), evidence.get("title", ""), evidence.get("note", "")]).lower()
+    candidates = iter_candidate_image_urls(html, page_url)
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: evidence_image_score(trend, evidence, candidate, page_text),
+        reverse=True,
+    )
+    for candidate in ranked:
+        score = evidence_image_score(trend, evidence, candidate, page_text)
+        if score < 2:
+            continue
+        parsed = urlparse(candidate["url"])
         suffix = Path(parsed.path).suffix.lower()
-        if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"} and confirm_image_asset(candidate):
-            return candidate
-        if confirm_image_asset(candidate):
-            return candidate
+        if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"} and confirm_image_asset(candidate["url"]):
+            return candidate["url"]
+        if confirm_image_asset(candidate["url"]):
+            return candidate["url"]
     return ""
 
 
-def backfill_representative_image(trend: dict[str, Any]) -> None:
+def build_pattern_image_prompt(trend: dict[str, Any]) -> str:
+    trimmed_evidence = [
+        {
+            "source_name": evidence.get("source_name", ""),
+            "title": evidence.get("title", ""),
+            "url": evidence.get("url", ""),
+            "note": evidence.get("note", ""),
+        }
+        for evidence in trend.get("evidence", [])[:6]
+    ]
+    return textwrap.dedent(
+        f"""
+        你是花型图片筛选助手。请联网检查下面这些来源页面，只选择一张真正符合花型要求的图片。
+
+        趋势信息：
+        - 中文名：{trend.get("name_zh", "")}
+        - 英文名：{trend.get("name_en", "")}
+        - 分类：{trend.get("category", "")}
+        - 核心视觉：{", ".join(trend.get("core_visuals", []))}
+        - 关键词：{", ".join(trend.get("keywords", []))}
+
+        来源页面：
+        {json.dumps(trimmed_evidence, ensure_ascii=False, indent=2)}
+
+        严格规则：
+        1. 只能返回花型/印花/图案本身的图片，优先选择 pattern repeat、fabric swatch、wallpaper sample、print close-up、trend board。
+        2. 禁止返回人物、模特、穿搭照、房间整体场景、家具陈列图、品牌封面、文章头图、logo。
+        3. 优先使用来源页内能直接访问的图片 URL，不要返回页面 URL。
+        4. 如果找不到符合规则的图片，就返回空字符串。
+
+        只输出一个 JSON 代码块，字段固定为：
+        {{
+          "representative_image_url": "",
+          "image_source_url": "",
+          "reason": ""
+        }}
+        """
+    ).strip()
+
+
+def select_pattern_image_with_kimi(trend: dict[str, Any], cwd: Path) -> str:
+    raw = run_kimi(build_pattern_image_prompt(trend), cwd)
+    data = parse_json_object(raw, cwd)
+    candidate = str(data.get("representative_image_url", "")).strip()
+    return candidate if confirm_image_asset(candidate) else ""
+
+
+def backfill_representative_image(trend: dict[str, Any], cwd: Path) -> None:
     existing = str(trend.get("representative_image_url", "")).strip()
     if confirm_image_asset(existing):
+        return
+
+    try:
+        selected = select_pattern_image_with_kimi(trend, cwd)
+    except (ValueError, RuntimeError, json.JSONDecodeError):
+        selected = ""
+    if selected:
+        trend["representative_image_url"] = selected
         return
 
     for evidence in trend.get("evidence", []):
@@ -322,7 +532,7 @@ def backfill_representative_image(trend: dict[str, Any]) -> None:
             html = fetch_html(page_url)
         except (HTTPError, URLError, TimeoutError, ValueError, OSError):
             continue
-        image_url = extract_image_url_from_html(html, page_url)
+        image_url = extract_image_url_from_html(html, page_url, trend, evidence)
         if image_url:
             trend["representative_image_url"] = image_url
             return
@@ -370,7 +580,7 @@ def build_scout_prompt(args: argparse.Namespace, source_ladder: str) -> str:
         5. 如果后段位证据较弱，字段里明确写“待核验”。
         6. 不要编造销量、GMV、平台后台指数或闭门数据。
         7. `slug` 使用英文小写连字符。
-        8. `representative_image_url` 尽量给公开文章头图或可直接访问的图片 URL；没有就写空字符串。
+        8. `representative_image_url` 只有在能确认它是花型/印花图样本身时才填写；如果只是人物、场景、品牌头图或无关封面，就写空字符串。
 
         只输出一个 ```json 代码块，不要输出其他说明。JSON 数组中的每个对象都必须包含以下字段：
         - rank
@@ -429,7 +639,7 @@ def build_article_prompt(
         3. “趋势解读”中必须拆成“事实”和“研判”。
         4. “数据支撑”里必须先给证据表，再决定是否画 Mermaid 趋势线。
         5. 只有当公开时间序列证据足够时，才输出 Mermaid 折线图；否则改写为“公开时间序列证据不足，暂不绘制趋势线，详见上表。”
-        6. 如果 `representative_image_url` 为空、无效或待核验，删除整行图片语法。
+        6. 如果 `representative_image_url` 为空、无效、待核验，或者它不是花型/印花图样本身，删除整行图片语法。
         7. 不要编造销量、GMV、平台后台热搜指数。
         8. 所有来源链接都用 Markdown 链接。
         9. 语言使用中文。
@@ -512,7 +722,7 @@ def main() -> int:
     raw_trends = parse_json_array(scout_raw, output_dir)
     trends = normalize_trends(raw_trends, args.count)
     for trend in trends:
-        backfill_representative_image(trend)
+        backfill_representative_image(trend, output_dir)
     write_text(output_dir / trends_json_name(len(trends)), json.dumps(trends, ensure_ascii=False, indent=2))
 
     for trend in trends:

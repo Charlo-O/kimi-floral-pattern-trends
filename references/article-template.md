@@ -45,6 +45,8 @@ xychart-beta
 ````
 
 补充规则：
+- `representative_image_url` 必须是花型/印花/图案本身，优先选择 pattern repeat、fabric swatch、wallpaper sample、print close-up
+- 不要用人物图、模特图、整屋场景图、品牌封面图代替花型图
 - `representative_image_url` 优先来自证据来源页的 `og:image`、`twitter:image` 或正文首图
 - `representative_image_url` 为空、无效或待核验时，整行图片语法删除
 - 表格中的日期尽量写到天，拿不到就写月份并标注 `待核验`
