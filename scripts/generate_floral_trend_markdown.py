@@ -108,6 +108,40 @@ TRUSTED_PATTERN_DOMAINS = (
     "fzthinking.com",
     "cfw.cn",
 )
+STOPWORD_TOKENS = {
+    "trend",
+    "trends",
+    "print",
+    "prints",
+    "pattern",
+    "patterns",
+    "report",
+    "reports",
+    "spring",
+    "summer",
+    "autumn",
+    "winter",
+    "season",
+    "seasonal",
+    "home",
+    "decor",
+    "collection",
+    "design",
+    "styles",
+}
+HARD_REJECT_URL_KEYWORDS = (
+    "kimi-web-img.moonshot.cn",
+    "stripe",
+    "stripes",
+    "sofa",
+    "bedroom",
+    "living-room",
+    "lookbook",
+    "campaign",
+    "poster",
+    "avatar",
+    "logo",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -351,6 +385,50 @@ def keyword_hits(text: str, keywords: tuple[str, ...]) -> int:
     return sum(1 for keyword in keywords if keyword in lowered)
 
 
+def trend_specific_tokens(trend: dict[str, Any]) -> set[str]:
+    raw_parts: list[str] = []
+    raw_parts.extend([str(trend.get("name_zh", "")), str(trend.get("name_en", "")), str(trend.get("category", ""))])
+    raw_parts.extend([str(item) for item in trend.get("keywords", [])])
+    raw_parts.extend([str(item) for item in trend.get("core_visuals", [])])
+    joined = " ".join(raw_parts).lower()
+    tokens = set(re.findall(r"[a-z]{4,}", joined))
+    return {token for token in tokens if token not in STOPWORD_TOKENS}
+
+
+def evidence_domains(trend: dict[str, Any]) -> set[str]:
+    domains: set[str] = set()
+    for evidence in trend.get("evidence", []):
+        domain = urlparse(str(evidence.get("url", "")).strip()).netloc.lower()
+        if domain:
+            domains.add(domain)
+    return domains
+
+
+def image_relevant_to_trend(trend: dict[str, Any], image_url: str) -> bool:
+    lowered = image_url.lower()
+    if any(keyword in lowered for keyword in HARD_REJECT_URL_KEYWORDS):
+        if "stripe" in lowered or "stripes" in lowered:
+            tokens = trend_specific_tokens(trend)
+            if "stripe" not in tokens and "stripes" not in tokens:
+                return False
+        else:
+            return False
+
+    tokens = trend_specific_tokens(trend)
+    positive_hits = sum(1 for token in tokens if token in lowered)
+    domain = urlparse(image_url).netloc.lower()
+    allowed_by_evidence = any(base in domain for base in evidence_domains(trend))
+    trusted = any(base in domain for base in TRUSTED_PATTERN_DOMAINS)
+
+    if positive_hits > 0:
+        return True
+    if trusted and not any(keyword in lowered for keyword in PATTERN_NEGATIVE_KEYWORDS):
+        return True
+    if allowed_by_evidence and not any(keyword in lowered for keyword in PATTERN_NEGATIVE_KEYWORDS):
+        return True
+    return False
+
+
 def confirm_image_asset(url: str) -> bool:
     if not is_usable_image_url(url):
         return False
@@ -440,6 +518,8 @@ def evidence_image_score(trend: dict[str, Any], evidence: dict[str, str], candid
         score += 2
     if candidate.get("kind") in {"og", "twitter", "meta"}:
         score -= 1
+    if not image_relevant_to_trend(trend, candidate.get("url", "")):
+        score -= 8
     return score
 
 
@@ -513,7 +593,7 @@ def select_pattern_image_with_kimi(trend: dict[str, Any], cwd: Path) -> str:
 
 def backfill_representative_image(trend: dict[str, Any], cwd: Path) -> None:
     existing = str(trend.get("representative_image_url", "")).strip()
-    if confirm_image_asset(existing):
+    if confirm_image_asset(existing) and image_relevant_to_trend(trend, existing):
         return
 
     try:
